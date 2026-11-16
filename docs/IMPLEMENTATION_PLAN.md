@@ -80,6 +80,14 @@ Exit criteria: qualifying fixtures render once, arrive in Telegram once and reta
 - Calibrate GTA 6 scoring against manually labeled streams and measure precision, recall, cost per reviewed clip and time-to-review.
 - Consider an ML detector or advanced reframing only after labeled-data and profiling evidence justify them.
 
+## Milestone 7.1 — Shadow reactions and review feedback
+
+- **Implemented:** separate configurable reaction-wave detector for laughter, surprise, excitement, funny failures and reliable EventSub emote names.
+- **Implemented:** per-user repeat discounting, distinct-user breadth, adaptive channel baselines, overlapping-wave grouping and explainable SQLite shadow records.
+- **Implemented:** production-versus-shadow CLI report; shadow candidates cannot trigger media processing.
+- **Implemented:** two-stage Telegram rejection flow with four stable reasons and compatible SQLite migration for existing reviews.
+- Future tuning target: evaluate shadow recall/precision toward roughly 10–20 useful suggestions per active-streamer hour without quotas or production-threshold changes.
+
 ## Deferred or excluded
 
 - Any automatic social-media publishing: permanently excluded.

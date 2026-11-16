@@ -28,7 +28,13 @@ class Review:
     telegram_message_id: int | None
     decided_by: int | None
     decided_at: str | None
+    rejection_reason: str | None
     last_error: str
+
+
+REJECTION_REASONS = frozenset({
+    "advertisement", "boring", "wrong_timing", "duplicate",
+})
 
 
 class SQLiteReviewStore:
@@ -65,11 +71,17 @@ class SQLiteReviewStore:
                     telegram_message_id INTEGER,
                     decided_by INTEGER,
                     decided_at TEXT,
+                    rejection_reason TEXT,
                     last_error TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(reviews)")
+            }
+            if "rejection_reason" not in columns:
+                connection.execute("ALTER TABLE reviews ADD COLUMN rejection_reason TEXT")
             connection.execute("""
                 CREATE TABLE IF NOT EXISTS review_state (
                     key TEXT PRIMARY KEY,
@@ -95,6 +107,7 @@ class SQLiteReviewStore:
             telegram_message_id=row["telegram_message_id"],
             decided_by=row["decided_by"],
             decided_at=row["decided_at"],
+            rejection_reason=row["rejection_reason"],
             last_error=row["last_error"],
         )
 
@@ -177,27 +190,40 @@ class SQLiteReviewStore:
         callback_token: str,
         decision: str,
         user_id: int,
+        rejection_reason: str | None = None,
     ) -> str:
         if decision not in {"approved", "rejected"}:
             return "invalid"
+        if decision == "approved" and rejection_reason is not None:
+            return "invalid"
+        if decision == "rejected" and rejection_reason not in REJECTION_REASONS:
+            return "invalid"
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT status, callback_token FROM reviews WHERE candidate_id = ?",
+                "SELECT status, callback_token, rejection_reason FROM reviews WHERE candidate_id = ?",
                 (candidate_id,),
             ).fetchone()
             if row is None or not secrets.compare_digest(row["callback_token"], callback_token):
                 return "invalid"
             if row["status"] == decision:
-                return "duplicate"
+                if decision == "approved" or row["rejection_reason"] == rejection_reason:
+                    return "duplicate"
+                return "conflict"
             if row["status"] != "pending":
                 return "conflict"
             cursor = connection.execute("""
                 UPDATE reviews
-                SET status = ?, decided_by = ?, decided_at = CURRENT_TIMESTAMP,
+                SET status = ?, rejection_reason = ?, decided_by = ?, decided_at = CURRENT_TIMESTAMP,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE candidate_id = ? AND status = 'pending'
-            """, (decision, user_id, candidate_id))
+            """, (decision, rejection_reason, user_id, candidate_id))
         return "updated" if cursor.rowcount == 1 else "conflict"
+
+    def callback_status(self, candidate_id: str, callback_token: str) -> str | None:
+        review = self.get(candidate_id)
+        if review is None or not secrets.compare_digest(review.callback_token, callback_token):
+            return None
+        return review.status
 
     def update_offset(self) -> int:
         with self._connect() as connection:

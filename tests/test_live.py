@@ -1,9 +1,11 @@
 from pathlib import Path
 import asyncio
+from unittest.mock import patch
 
 from cliphunter.config import DetectionConfig
 from cliphunter.live import LiveChatMonitor, LiveDetectionBuffer, diagnostic_snapshot
 from cliphunter.persistence import SQLiteCandidateStore
+from cliphunter.models import Candidate, ChatMessage
 from cliphunter.replay import read_jsonl
 from cliphunter.twitch import TwitchConfig, TwitchEventSubClient
 
@@ -34,6 +36,32 @@ def test_live_buffer_bounds_each_channel_independently(tmp_path):
 
     assert set(buffer.messages) == {"small", "large"}
     assert sum(len(channel) for channel in buffer.messages.values()) == len(messages)
+
+
+def test_live_buffer_does_not_persist_candidate_after_media_has_expired(tmp_path):
+    store = SQLiteCandidateStore(tmp_path / "live.db")
+    buffer = LiveDetectionBuffer(
+        store,
+        DetectionConfig(),
+        media_retention_seconds=120,
+    )
+    buffer.add(ChatMessage("channel", 1_000, "viewer", "message"))
+    stale = Candidate(
+        id="stale", streamer_id="channel", event_timestamp=800,
+        hype_score=8, signals={}, clip_start=770, clip_end=820,
+        detector_version="test",
+    )
+    fresh = Candidate(
+        id="fresh", streamer_id="channel", event_timestamp=980,
+        hype_score=8, signals={}, clip_start=950, clip_end=1_000,
+        detector_version="test",
+    )
+
+    with patch("cliphunter.live.detect_candidates", return_value=[stale, fresh]):
+        detected = buffer.evaluate()
+
+    assert [candidate.id for candidate in detected] == ["fresh"]
+    assert [candidate.id for candidate in store.list()] == ["fresh"]
 
 
 def test_monitor_connects_listener_to_detector_and_shuts_down(tmp_path):
@@ -91,6 +119,8 @@ def test_diagnostic_snapshot_is_useful_and_contains_no_credentials(tmp_path):
         "active_subscriptions": 2,
         "received_chat_messages": 17,
         "detected_highlight_candidates": 3,
+        "shadow_reaction_candidates": 0,
+        "shadow_reaction_failures": 0,
         "reconnects": 0,
         "connection_failures": 0,
         "invalid_messages": 0,

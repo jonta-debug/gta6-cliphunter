@@ -31,8 +31,14 @@ class MediaWorker:
         streamer_label: str | None = None,
         poll_interval_seconds: float = 1.0,
         clip_wait_timeout_seconds: float = 90.0,
+        shutdown_drain_timeout_seconds: float = 15.0,
     ) -> None:
-        if not streamer_id or poll_interval_seconds <= 0 or clip_wait_timeout_seconds <= 0:
+        if (
+            not streamer_id
+            or poll_interval_seconds <= 0
+            or clip_wait_timeout_seconds <= 0
+            or shutdown_drain_timeout_seconds < 0
+        ):
             raise ValueError("invalid media worker configuration")
         self.buffer = buffer
         self.store = store
@@ -47,6 +53,7 @@ class MediaWorker:
             raise ValueError("rendered_directory is required when rendering is enabled")
         self.poll_interval_seconds = poll_interval_seconds
         self.clip_wait_timeout_seconds = clip_wait_timeout_seconds
+        self.shutdown_drain_timeout_seconds = shutdown_drain_timeout_seconds
         self._handled: set[str] = set()
         self._tasks: dict[str, asyncio.Task] = {}
         self.errors: dict[str, str] = {}
@@ -56,6 +63,13 @@ class MediaWorker:
     async def _extract(self, candidate: Candidate) -> None:
         output = self.clips_directory / f"{candidate.id}.mp4"
         try:
+            log.info(
+                "processing candidate %s for streamer %s (clip %.3f..%.3f)",
+                candidate.id,
+                candidate.streamer_id,
+                candidate.clip_start,
+                candidate.clip_end,
+            )
             if output.exists():
                 try:
                     await self.buffer.validate_clip(output)
@@ -79,6 +93,7 @@ class MediaWorker:
             self.errors[candidate.id] = str(error)
             log.error("clip extraction failed for candidate %s: %s", candidate.id, error)
             return
+        log.info("clip extraction completed for candidate %s: %s", candidate.id, output)
         if self.renderer is None or self.rendered_directory is None:
             return
         rendered = self.rendered_directory / self.render_preset / f"{candidate.id}.mp4"
@@ -94,6 +109,7 @@ class MediaWorker:
             self.render_errors[candidate.id] = str(error)
             log.error("vertical rendering failed for candidate %s: %s", candidate.id, error)
             return
+        log.info("vertical rendering completed for candidate %s: %s", candidate.id, rendered)
         if self.review_coordinator is None:
             return
         try:
@@ -103,6 +119,7 @@ class MediaWorker:
                 original_path=output,
                 rendered_path=rendered,
             )
+            log.info("review handoff completed for candidate %s", candidate.id)
         except (ReviewDeliveryError, sqlite3.Error, OSError, ValueError) as error:
             self.review_errors[candidate.id] = str(error)
             log.error("review delivery failed for candidate %s: %s", candidate.id, error)
@@ -113,6 +130,7 @@ class MediaWorker:
             if candidate.id in self._handled:
                 continue
             self._handled.add(candidate.id)
+            log.info("queued persisted candidate %s for media processing", candidate.id)
             self._tasks[candidate.id] = asyncio.create_task(self._extract(candidate))
 
     def _collect_finished(self) -> None:
@@ -140,8 +158,35 @@ class MediaWorker:
                 except TimeoutError:
                     pass
         finally:
-            for task in self._tasks.values():
+            # Let the chat monitor's synchronous final evaluation run, then pick up
+            # any candidate it persisted before draining work with capture active.
+            await asyncio.sleep(0)
+            self._start_new_candidates()
+            if self._tasks and self.shutdown_drain_timeout_seconds:
+                _, pending = await asyncio.wait(
+                    self._tasks.values(),
+                    timeout=self.shutdown_drain_timeout_seconds,
+                )
+            else:
+                pending = {task for task in self._tasks.values() if not task.done()}
+            await asyncio.gather(
+                *(task for task in self._tasks.values() if task.done()),
+                return_exceptions=True,
+            )
+            if pending:
+                log.warning(
+                    "cancelling %d in-flight media task(s) during shutdown: %s",
+                    len(pending),
+                    ", ".join(
+                        sorted(
+                            candidate_id
+                            for candidate_id, task in self._tasks.items()
+                            if task in pending
+                        )
+                    ),
+                )
+            for task in pending:
                 task.cancel()
-            await asyncio.gather(*self._tasks.values(), return_exceptions=True)
+            await asyncio.gather(*pending, return_exceptions=True)
             self._tasks.clear()
             await self.buffer.stop()

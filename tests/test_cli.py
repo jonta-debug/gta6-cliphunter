@@ -7,6 +7,8 @@ import pytest
 
 from cliphunter.cli import _install_stop_signals, main
 from cliphunter.twitch import ConnectionHealth
+from cliphunter.reaction import ShadowCandidate
+from cliphunter.shadow import SQLiteShadowCandidateStore
 
 
 def test_replay_command_persists_candidates(chat_scenario, tmp_path, capsys, monkeypatch):
@@ -86,3 +88,25 @@ def test_sigint_handler_requests_graceful_pipeline_shutdown(monkeypatch):
     callbacks[signal.SIGINT]()
 
     assert stop.is_set()
+
+
+def test_shadow_report_keeps_reaction_signals_separate(tmp_path, capsys):
+    database = tmp_path / "shadow.db"
+    SQLiteShadowCandidateStore(database).save_many([ShadowCandidate(
+        id="shadow-1",
+        streamer_id="channel-1",
+        event_timestamp=100,
+        score=7.5,
+        window_start=95,
+        window_end=105,
+        categories={"laughter": {
+            "reaction_count": 5, "distinct_users": 4, "score": 7.5,
+        }},
+    )])
+
+    assert main(["shadow-report", "--database", str(database)]) == 0
+    output = json.loads(capsys.readouterr().out)
+
+    assert output["production_candidates"] == []
+    assert output["shadow_candidates"][0]["reasons"] == ["laughter"]
+    assert output["shadow_candidates"][0]["categories"]["laughter"]["reaction_count"] == 5

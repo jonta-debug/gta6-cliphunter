@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -149,7 +150,11 @@ def callback_update(review, *, action="a", user_id=42, query_id="query-1"):
             "id": query_id,
             "from": {"id": user_id},
             "data": f"review:{action}:{review.candidate_id}:{review.callback_token}",
-            "message": {"message_id": 77, "chat": {"id": -1001}},
+            "message": {
+                "message_id": 77,
+                "chat": {"id": -1001},
+                "caption": "GTA6 ClipHunter review",
+            },
         },
     }
 
@@ -183,17 +188,93 @@ def test_authorized_approve_reject_and_duplicate_callbacks_are_idempotent(tmp_pa
         approved, action="r", query_id="query-conflict"
     ))) == "conflict"
     assert asyncio.run(worker.handle_update(callback_update(
-        rejected, action="r", query_id="query-reject"
+        rejected, action="r", query_id="query-reject-menu"
+    ))) == "reason_required"
+    assert store.get(rejected.candidate_id).status == "pending"
+    reason_markup = json.loads([
+        call for call in request.calls if call[0] == "editMessageReplyMarkup"
+    ][0][1]["reply_markup"])
+    assert {
+        button[0]["callback_data"].split(":", 3)[1]
+        for button in reason_markup["inline_keyboard"]
+    } == {"advertisement", "boring", "wrong_timing", "duplicate"}
+    assert asyncio.run(worker.handle_update(callback_update(
+        rejected, action="wrong_timing", query_id="query-reject"
     ))) == "updated"
     assert asyncio.run(worker.handle_update(callback_update(
-        unauthorized, user_id=99, query_id="query-unauthorized"
+        rejected, action="wrong_timing", query_id="query-reject-duplicate"
+    ))) == "duplicate"
+    assert asyncio.run(worker.handle_update(callback_update(
+        rejected, action="boring", query_id="query-reject-conflict"
+    ))) == "conflict"
+    assert asyncio.run(worker.handle_update(callback_update(
+        unauthorized, action="boring", user_id=99, query_id="query-unauthorized"
     ))) == "unauthorized"
 
     assert store.get(approved.candidate_id).status == "approved"
     assert store.get(approved.candidate_id).decided_at == decided_at
     assert store.get(rejected.candidate_id).status == "rejected"
+    assert store.get(rejected.candidate_id).rejection_reason == "wrong_timing"
     assert store.get(unauthorized.candidate_id).status == "pending"
-    assert len([call for call in request.calls if call[0] == "editMessageReplyMarkup"]) == 2
+    assert len([call for call in request.calls if call[0] == "editMessageReplyMarkup"]) == 1
+    assert len([call for call in request.calls if call[0] == "editMessageCaption"]) == 2
+
+
+@pytest.mark.parametrize(
+    "reason", ["advertisement", "boring", "wrong_timing", "duplicate"]
+)
+def test_each_structured_rejection_reason_is_persisted(tmp_path, reason):
+    store = SQLiteReviewStore(tmp_path / f"{reason}.db")
+    request = FakeTelegramRequest()
+    telegram_config = config()
+    worker = TelegramCallbackWorker(
+        telegram_config, TelegramBotAPI(telegram_config, request=request), store
+    )
+    review = store.create_pending(
+        candidate(f"reject-{reason}"), streamer_label="xrohat", clip_duration=50,
+        original_path="original.mp4", rendered_path="vertical.mp4",
+    )
+
+    assert asyncio.run(worker.handle_update(callback_update(
+        review, action=reason, query_id=f"query-{reason}"
+    ))) == "updated"
+
+    decided = store.get(review.candidate_id)
+    assert decided.status == "rejected"
+    assert decided.rejection_reason == reason
+
+
+def test_existing_review_database_is_migrated_without_losing_records(tmp_path):
+    database = tmp_path / "legacy.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute("""
+            CREATE TABLE reviews (
+                candidate_id TEXT PRIMARY KEY, streamer_id TEXT NOT NULL,
+                streamer_label TEXT NOT NULL, hype_score REAL NOT NULL,
+                event_timestamp REAL NOT NULL, clip_duration REAL NOT NULL,
+                original_path TEXT NOT NULL, rendered_path TEXT NOT NULL,
+                status TEXT NOT NULL, callback_token TEXT NOT NULL UNIQUE,
+                notification_state TEXT NOT NULL, notification_attempts INTEGER NOT NULL DEFAULT 0,
+                telegram_chat_id TEXT, telegram_message_id INTEGER, decided_by INTEGER,
+                decided_at TEXT, last_error TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        connection.execute("""
+            INSERT INTO reviews (
+                candidate_id, streamer_id, streamer_label, hype_score,
+                event_timestamp, clip_duration, original_path, rendered_path,
+                status, callback_token, notification_state
+            ) VALUES ('legacy', '1', 'channel', 7, 100, 30,
+                      'original.mp4', 'rendered.mp4', 'rejected', 'token', 'sent')
+        """)
+
+    review = SQLiteReviewStore(database).get("legacy")
+
+    assert review is not None
+    assert review.status == "rejected"
+    assert review.rejection_reason is None
 
 
 def test_telegram_failure_does_not_remove_video_or_raise_from_media_worker(tmp_path):

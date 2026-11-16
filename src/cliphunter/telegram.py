@@ -212,6 +212,49 @@ class TelegramBotAPI:
             "reply_markup": '{"inline_keyboard":[]}',
         })
 
+    async def show_rejection_reasons(
+        self,
+        chat_id: str,
+        message_id: int,
+        candidate_id: str,
+        callback_token: str,
+    ) -> None:
+        reasons = (
+            ("Advertisement", "advertisement"),
+            ("Boring", "boring"),
+            ("Wrong timing", "wrong_timing"),
+            ("Duplicate", "duplicate"),
+        )
+        markup = {"inline_keyboard": [
+            [{
+                "text": label,
+                "callback_data": f"review:{reason}:{candidate_id}:{callback_token}",
+            }]
+            for label, reason in reasons
+        ]}
+        if any(len(button[0]["callback_data"].encode()) > 64 for button in markup["inline_keyboard"]):
+            raise TelegramAPIError("Telegram rejection callback data exceeds 64 bytes")
+        await self._call("editMessageReplyMarkup", {
+            "chat_id": chat_id,
+            "message_id": str(message_id),
+            "reply_markup": json.dumps(markup, separators=(",", ":")),
+        })
+
+    async def finalize_review_message(
+        self,
+        chat_id: str,
+        message_id: int,
+        caption: str,
+        result_text: str,
+    ) -> None:
+        updated_caption = (caption.rstrip() + f"\nReview: {result_text}").strip()
+        await self._call("editMessageCaption", {
+            "chat_id": chat_id,
+            "message_id": str(message_id),
+            "caption": updated_caption,
+            "reply_markup": '{"inline_keyboard":[]}',
+        })
+
 
 class ReviewCoordinator:
     def __init__(
@@ -276,20 +319,58 @@ class TelegramCallbackWorker:
             await self.api.answer_callback(callback_id, "Not authorized")
             return "unauthorized"
         parts = str(query.get("data") or "").split(":", 3)
-        if len(parts) != 4 or parts[0] != "review" or parts[1] not in {"a", "r"}:
+        reasons = {
+            "advertisement": "Advertisement",
+            "boring": "Boring",
+            "wrong_timing": "Wrong timing",
+            "duplicate": "Duplicate",
+        }
+        if len(parts) != 4 or parts[0] != "review" \
+                or parts[1] not in {"a", "r", *reasons}:
             await self.api.answer_callback(callback_id, "Invalid review action")
             return "invalid"
-        decision = "approved" if parts[1] == "a" else "rejected"
-        result = self.store.decide(parts[2], parts[3], decision, int(user_id))
+        action, candidate_id, callback_token = parts[1], parts[2], parts[3]
+        status = self.store.callback_status(candidate_id, callback_token)
+        if status is None:
+            await self.api.answer_callback(callback_id, "Invalid review action")
+            return "invalid"
+        message_id = message.get("message_id")
+        if action == "r":
+            if status == "pending" and isinstance(message_id, int):
+                await self.api.answer_callback(callback_id, "Choose a rejection reason")
+                await self.api.show_rejection_reasons(
+                    chat_id, message_id, candidate_id, callback_token
+                )
+                return "reason_required"
+            result = "duplicate" if status == "rejected" else "conflict"
+            await self.api.answer_callback(
+                callback_id,
+                "Already rejected" if result == "duplicate" else "Review was already decided",
+            )
+            return result
+        decision = "approved" if action == "a" else "rejected"
+        rejection_reason = action if action in reasons else None
+        result = self.store.decide(
+            candidate_id,
+            callback_token,
+            decision,
+            int(user_id),
+            rejection_reason,
+        )
         messages = {
-            "updated": decision.capitalize(),
+            "updated": "Approved" if decision == "approved" else f"Rejected: {reasons[action]}",
             "duplicate": f"Already {decision}",
             "conflict": "Review was already decided",
             "invalid": "Invalid review action",
         }
         await self.api.answer_callback(callback_id, messages[result])
-        if result == "updated" and isinstance(message.get("message_id"), int):
-            await self.api.remove_buttons(chat_id, message["message_id"])
+        if result == "updated" and isinstance(message_id, int):
+            await self.api.finalize_review_message(
+                chat_id,
+                message_id,
+                str(message.get("caption") or "GTA6 ClipHunter review"),
+                messages[result],
+            )
         return result
 
     async def run(self, stop_event: asyncio.Event | None = None) -> None:

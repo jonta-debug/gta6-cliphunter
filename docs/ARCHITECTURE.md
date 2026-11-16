@@ -48,6 +48,8 @@ Implemented in Milestone 1: strict multi-file JSONL replay, per-streamer sliding
 
 Implemented in Milestone 2: one official EventSub WebSocket with up to five `channel.chat.message` subscriptions, official payload normalization, EventSub message-ID deduplication, keepalive health checks, Twitch-directed reconnect, unexpected-disconnect resubscription with exponential backoff, bounded live buffering and graceful shutdown. Startup and hourly token validation verify the client, token owner, scope and lifetime; broadcaster logins resolve through Helix Get Users. The live buffer invokes the same deterministic `detect_candidates` function as replay.
 
+Implemented shadow detector: `chat-reaction-shadow-v1` independently matches reaction categories, discounts repeated users, compares overlapping windows with recent per-channel baselines, groups event waves, and persists explainable results in `shadow_candidates`. Shadow records have no path to the production `candidates` table or media workers.
+
 Twitch credentials are environment-only. The current version requires a pre-obtained user access token with `user:read:chat`; OAuth acquisition and refresh are not yet automated. Diagnostic output contains operational counters only, never configuration or authorization values.
 
 The `run` supervisor starts the chat monitor, a restartable media worker per resolved channel, and at most one leased Telegram callback poller. A shared shutdown event drains components and gives FFmpeg time to finalize its current segment. Noncritical media/Telegram failures are logged without terminating chat ingestion.
@@ -90,7 +92,7 @@ One interface supports Gemini, OpenRouter, OpenAI-compatible endpoints and optio
 
 ### Telegram delivery
 
-Implemented: after successful rendering, create an idempotent SQLite review record and optionally send the video, channel, Event Hype score, timestamp and duration through the Telegram Bot API. A separate long-poll worker accepts tokenized Approve/Reject callbacks only from configured user IDs in the configured chat. Delivery state and update offsets prevent normal restart duplicates; approval never triggers social publishing. A future Viral Potential gate may restrict which rendered candidates enter review after AI scoring exists.
+Implemented: after successful rendering, create an idempotent SQLite review record and optionally send the video, channel, Event Hype score, timestamp and duration through the Telegram Bot API. A separate long-poll worker accepts tokenized callbacks only from configured user IDs in the configured chat. Approve finalizes immediately; Reject requires a persisted structured reason (`advertisement`, `boring`, `wrong_timing`, or `duplicate`). Delivery state and update offsets prevent normal restart duplicates; approval never triggers social publishing.
 
 ## Domain records
 
@@ -101,7 +103,7 @@ Implemented: after successful rendering, create an idempotent SQLite review reco
 - `Score`: `event_hype` and optional `viral_potential`, both 0–10, with component breakdown and version.
 - `Artifact`: source fragment, rendered clip, subtitle/thumbnail metadata and retention state.
 - `AIUsage`: provider/model/purpose, tokens, estimated cost, status and timestamps.
-- `Review`: Telegram message identity, reviewer action and notes.
+- `Review`: Telegram message identity, reviewer action and optional structured rejection reason.
 
 ## Pipeline and gates
 

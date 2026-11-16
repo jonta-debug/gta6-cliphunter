@@ -230,6 +230,54 @@ def test_render_failure_keeps_extracted_clip_and_is_isolated(tmp_path):
     assert worker.render_errors[candidate.id] == "expected render failure"
 
 
+def test_worker_drains_candidate_during_shutdown(tmp_path):
+    buffer_started = asyncio.Event()
+    extraction_started = asyncio.Event()
+    allow_extraction = asyncio.Event()
+
+    class SlowBuffer:
+        last_error = None
+
+        async def start(self):
+            buffer_started.set()
+
+        async def stop(self):
+            return None
+
+        async def extract_clip(self, _id, _start, _end, output, **_kwargs):
+            extraction_started.set()
+            await allow_extraction.wait()
+            Path(output).write_bytes(b"completed")
+
+    store = SQLiteCandidateStore(tmp_path / "shutdown.db")
+    candidate = Candidate(
+        id="shutdown-drain", streamer_id="streamer-1", event_timestamp=10,
+        hype_score=8, signals={}, clip_start=5, clip_end=15,
+        detector_version="test",
+    )
+    worker = MediaWorker(
+        SlowBuffer(), store, "streamer-1", tmp_path / "clips",
+        poll_interval_seconds=0.01, shutdown_drain_timeout_seconds=1,
+    )
+
+    async def scenario():
+        stop = asyncio.Event()
+        task = asyncio.create_task(worker.run(stop))
+        await asyncio.wait_for(buffer_started.wait(), timeout=1)
+        # Simulate the chat monitor's final synchronous evaluation immediately
+        # before all components observe the shared shutdown event.
+        store.save(candidate)
+        stop.set()
+        await asyncio.wait_for(extraction_started.wait(), timeout=1)
+        allow_extraction.set()
+        await asyncio.wait_for(task, timeout=1)
+
+    asyncio.run(scenario())
+
+    assert (tmp_path / "clips" / "shutdown-drain.mp4").read_bytes() == b"completed"
+    assert not worker.errors
+
+
 def test_worker_replaces_interrupted_original_and_rendered_artifacts(tmp_path):
     class RecoveringBuffer:
         async def validate_clip(self, _path):

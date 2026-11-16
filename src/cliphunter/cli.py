@@ -72,6 +72,13 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--rendered-root", default="./data/rendered")
     run.add_argument("--retention", type=float, default=120.0)
     run.add_argument("--segment-seconds", type=float, default=2.0)
+
+    shadow_report = commands.add_parser(
+        "shadow-report", help="compare production and shadow detector candidates"
+    )
+    shadow_report.add_argument("--database", default=database_path(), help="SQLite database path")
+    shadow_report.add_argument("--streamer-id")
+    shadow_report.add_argument("--limit", type=int, default=20)
     return parser
 
 
@@ -88,13 +95,17 @@ def _install_stop_signals(stop_event: asyncio.Event) -> None:
 
 async def _build_live_monitor(database: str):
     from .live import LiveChatMonitor, LiveDetectionBuffer
+    from .reaction import ReactionDetector, ReactionDetectorConfig
+    from .shadow import SQLiteShadowCandidateStore
     from .twitch import TwitchConfig, TwitchEventSubClient, TwitchIdentityClient
 
     raw_config = TwitchConfig.from_env()
     identity = TwitchIdentityClient(raw_config)
     twitch_config = await identity.prepare()
     detector = LiveDetectionBuffer(
-        SQLiteCandidateStore(database), DetectionConfig.from_env()
+        SQLiteCandidateStore(database), DetectionConfig.from_env(),
+        shadow_detector=ReactionDetector(ReactionDetectorConfig.from_env()),
+        shadow_store=SQLiteShadowCandidateStore(database),
     )
     client = TwitchEventSubClient(twitch_config, token_validator=identity.validate)
     return LiveChatMonitor(client, detector), client, detector
@@ -227,6 +238,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             "candidates": len(candidates),
             "candidate_ids": [candidate.id for candidate in candidates],
             "database": args.database,
+        }, sort_keys=True))
+        return 0
+
+    if args.command == "shadow-report":
+        from .shadow import SQLiteShadowCandidateStore
+        if args.limit < 1:
+            raise SystemExit("Shadow report error: limit must be positive")
+        production = SQLiteCandidateStore(args.database).list(
+            streamer_id=args.streamer_id, limit=args.limit
+        )
+        shadow = SQLiteShadowCandidateStore(args.database).list(
+            streamer_id=args.streamer_id, limit=args.limit
+        )
+        print(json.dumps({
+            "production_candidates": [item.to_dict() for item in production],
+            "shadow_candidates": [item.to_dict() for item in shadow],
         }, sort_keys=True))
         return 0
 

@@ -174,3 +174,18 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m cliphunter telegram-review \
 ```
 
 The poller accepts decisions only from `TELEGRAM_ALLOWED_USER_IDS` in `TELEGRAM_CHAT_ID`. Decisions never publish or delete either video artifact.
+
+Approve finalizes immediately. Reject opens a second menu with `advertisement`, `boring`, `wrong_timing`, and `duplicate`; the selected machine-readable reason is stored with the rejected review.
+
+## Shadow reaction detection
+
+Live commands also run `chat-reaction-shadow-v1` alongside the unchanged production detector. It recognizes configurable laughter, surprise, excitement and funny-failure waves, but writes only to `shadow_candidates`; it never creates clips or Telegram reviews.
+
+Compare recent production and shadow results, including category signal counts:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m cliphunter shadow-report \
+  --database data/cliphunter.db --limit 20
+```
+
+Filter one numeric broadcaster with `--streamer-id BROADCASTER_ID`. Shadow thresholds are documented in `.env.example` and do not alter `chat-adaptive-v1` settings.

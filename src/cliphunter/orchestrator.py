@@ -14,8 +14,10 @@ from .media import MediaSource, MediaSourceResolver, YtDlpTwitchResolver
 from .media_worker import MediaWorker
 from .persistence import SQLiteCandidateStore
 from .renderer import VerticalRenderer
+from .reaction import ReactionDetector, ReactionDetectorConfig
 from .reviews import SQLiteReviewStore
 from .rolling_buffer import RollingBuffer
+from .shadow import SQLiteShadowCandidateStore
 from .telegram import (
     ReviewCoordinator,
     TelegramBotAPI,
@@ -145,7 +147,13 @@ async def build_pipeline(config: RunConfig) -> tuple[PipelineRunner, tuple[str, 
     )
 
     candidate_store = SQLiteCandidateStore(config.database)
-    detector = LiveDetectionBuffer(candidate_store, DetectionConfig.from_env())
+    detector = LiveDetectionBuffer(
+        candidate_store,
+        DetectionConfig.from_env(),
+        shadow_detector=ReactionDetector(ReactionDetectorConfig.from_env()),
+        shadow_store=SQLiteShadowCandidateStore(config.database),
+        media_retention_seconds=config.retention_seconds,
+    )
     twitch_client = TwitchEventSubClient(prepared, token_validator=identity.validate)
     chat_monitor = LiveChatMonitor(twitch_client, detector)
     components = [PipelineComponent("twitch-chat", chat_monitor.run, critical=True)]
