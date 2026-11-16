@@ -1,1 +1,1 @@
-# ClippingBot
+# gta6-cliphunter
