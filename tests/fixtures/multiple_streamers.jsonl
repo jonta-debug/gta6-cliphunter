@@ -1,0 +1,4 @@
+{"streamer_id":"small","timestamp":0,"username":"alice","text":"hello","emotes":[]}
+{"streamer_id":"large","timestamp":0.5,"username":"viewer1","text":"hi","emotes":0}
+{"streamer_id":"small","timestamp":"1970-01-01T00:00:05Z","username":"bob","text":"nice","emotes":["Pog"]}
+{"streamer_id":"large","timestamp":5.5,"username":"viewer2","text":"WOW PLAY","is_emote":true}
